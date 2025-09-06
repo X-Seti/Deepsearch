@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# X-Seti Sept05 - deepsearch0.5 - extended search and optional replace tool
+# Keeps original deepsearch behavior but adds replace/exclude features.
+
+# Extended version: search, replace, rename, exclude, regex, context, backups, diffs, etc.
+
+set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage: $0 [options] <pattern> [path]
+
+Options:
+  -i, --ignore-case       Case-insensitive search
+  -E, --regex             Treat pattern as regex (default: literal string)
+  -t, --type <glob>       Limit filenames (e.g. '*.c,*.h,*.py')
+  -r, --replace <string>  Replace search pattern with string
+  -n, --name              Match and replace in filenames instead of contents
+      --dirs              Restrict renaming to directories only
+      --exclude <glob>    Exclude files/dirs matching glob (can be repeated)
+      --apply             Actually perform changes (default is dry-run)
+      --backup            Make .bak backups before replacing
+      --diff              Show diff preview of changes instead of updating
+      --context N         Show N lines of context around matches
+      --count             Only print counts of matches per file
+      --summary           Print summary report at end
+      --first             Stop after first match
+      --binary            Allow binary files (default: skip them)
+  -h, --help              Show this help
+
+Examples:
+  $0 foo src/                               # search 'foo' in files
+  $0 -i bar .                               # case-insensitive search for 'bar'
+  $0 -E 'foo[0-9]+' src/                    # regex search
+  $0 -t '*.c,*.h' baz src/                  # search in C source files only
+  $0 -r newfoo oldfoo src/ --backup         # replace with backups
+  $0 -r newfoo oldfoo --apply --diff        # show diff before applying
+  $0 -n -r newname oldname .                # rename files
+  $0 foo . --exclude '*.log' --context 2    # skip logs, show 2 lines of context
+EOF
+    exit 1
+}
+
+# defaults
+IGNORE_CASE=0
+REGEX=0
+TYPES=""
+REPLACE=""
+APPLY=0
+NAME_MODE=0
+DIRS_ONLY=0
+EXCLUDES=(".git/*" "node_modules/*" "__pycache__/*")  # default excludes
+BACKUP=0
+DIFF=0
+CONTEXT=0
+COUNT=0
+SUMMARY=0
+FIRST=0
+ALLOW_BINARY=0
+
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--ignore-case) IGNORE_CASE=1 ;;
+        -E|--regex) REGEX=1 ;;
+        -t|--type) TYPES=$2; shift ;;
+        -r|--replace) REPLACE=$2; shift ;;
+        -n|--name) NAME_MODE=1 ;;
+        --dirs) DIRS_ONLY=1 ;;
+        --exclude) EXCLUDES+=("$2"); shift ;;
+        --apply) APPLY=1 ;;
+        --backup) BACKUP=1 ;;
+        --diff) DIFF=1 ;;
+        --context) CONTEXT=$2; shift ;;
+        --count) COUNT=1 ;;
+        --summary) SUMMARY=1 ;;
+        --first) FIRST=1 ;;
+        --binary) ALLOW_BINARY=1 ;;
+        -h|--help) usage ;;
+        *) ARGS+=("$1") ;;
+    esac
+    shift
+done
+
+if [[ ${#ARGS[@]} -lt 1 ]]; then
+    usage
+fi
+
+PATTERN=${ARGS[0]}
+ROOT=${ARGS[1]:-.}
+
+# grep options
+GREP_OPTS="-rn --color=always"
+[[ $IGNORE_CASE -eq 1 ]] && GREP_OPTS="$GREP_OPTS -i"
+[[ $REGEX -eq 0 ]] && GREP_OPTS="$GREP_OPTS -F"  # literal search
+[[ $CONTEXT -gt 0 ]] && GREP_OPTS="$GREP_OPTS -C $CONTEXT"
+[[ $COUNT -eq 1 ]] && GREP_OPTS="$GREP_OPTS -c"
+
+# build find filters
+FIND_EXPR=(-type f)
+if [[ -n $TYPES ]]; then
+    IFS=',' read -ra exts <<< "$TYPES"
+    FIND_EXPR=()
+    for ext in "${exts[@]}"; do
+        FIND_EXPR+=(-name "$ext" -o)
+    done
+    unset 'FIND_EXPR[${#FIND_EXPR[@]}-1]'
+fi
+
+for excl in "${EXCLUDES[@]}"; do
+    FIND_EXPR+=(-not -path "$excl")
+done
+
+# tracking for summary
+MODIFIED=0
+MATCHES=0
+SCANNED=0
+
+# --- Replace Features ---
+if [[ -n $REPLACE ]]; then
+    if [[ $NAME_MODE -eq 1 ]]; then
+        # filename replace
+        echo ">>> Renaming files matching '$PATTERN' -> '$REPLACE'"
+        find "$ROOT" -depth -name "*$PATTERN*" \( "${FIND_EXPR[@]}" \) -print0 \
+          | while IFS= read -r -d '' f; do
+              [[ $DIRS_ONLY -eq 1 && ! -d $f ]] && continue
+              newname=$(echo "$f" | sed "s/${PATTERN}/${REPLACE}/g")
+              if [[ $APPLY -eq 1 ]]; then
+                  mv -v "$f" "$newname"
+                  ((MODIFIED++))
+              else
+                  echo "Would rename: $f -> $newname"
+              fi
+            done
+    else
+        # inside file replace
+        echo ">>> Replacing '$PATTERN' -> '$REPLACE' in files under $ROOT"
+        find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 \
+          | while IFS= read -r -d '' f; do
+              [[ $ALLOW_BINARY -eq 0 && $(file -b --mime "$f") =~ binary ]] && continue
+              if grep -q -- "$PATTERN" "$f"; then
+                  ((MATCHES++))
+                  if [[ $APPLY -eq 1 ]]; then
+                      [[ $BACKUP -eq 1 ]] && cp "$f" "$f.bak"
+                      if [[ $DIFF -eq 1 ]]; then
+                          sed "s/${PATTERN}/${REPLACE}/g" "$f" | diff -u "$f" - || true
+                      else
+                          sed -i "s/${PATTERN}/${REPLACE}/g" "$f"
+                          echo "Updated: $f"
+                          ((MODIFIED++))
+                      fi
+                  else
+                      echo "Would update: $f"
+                  fi
+                  [[ $FIRST -eq 1 ]] && exit 0
+              fi
+          done
+    fi
+    [[ $SUMMARY -eq 1 ]] && echo "Summary: $MATCHES matches, $MODIFIED files modified."
+    exit 0
+fi
+
+# --- Classic deepsearch behavior ---
+echo ">>> Searching for '$PATTERN' under $ROOT"
+find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 \
+  | while IFS= read -r -d '' f; do
+      [[ $ALLOW_BINARY -eq 0 && $(file -b --mime "$f") =~ binary ]] && continue
+      ((SCANNED++))
+      if grep $GREP_OPTS -- "$PATTERN" "$f"; then
+          ((MATCHES++))
+          [[ $FIRST -eq 1 ]] && exit 0
+      fi
+    done
+
+[[ $SUMMARY -eq 1 ]] && echo "Summary: $SCANNED files scanned, $MATCHES matches."
