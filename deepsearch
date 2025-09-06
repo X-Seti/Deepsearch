@@ -1,176 +1,266 @@
-#!/usr/bin/env bash
-# X-Seti Sept05 - deepsearch0.5 - extended search and optional replace tool
-# Keeps original deepsearch behavior but adds replace/exclude features.
+#!/bin/bash
 
-# Extended version: search, replace, rename, exclude, regex, context, backups, diffs, etc.
+# deepsearch: Search file names and contents in a folder, usable via Dolphin or terminal
+# Updated to exclude old/ folders by default and added replace functionality
 
-set -euo pipefail
+# --- Configurable ---
+DEFAULT_EDITOR="kate"  # Options: kate, kwrite, code
 
-usage() {
-    cat <<EOF
-Usage: $0 [options] <pattern> [path]
-
-Options:
-  -i, --ignore-case       Case-insensitive search
-  -E, --regex             Treat pattern as regex (default: literal string)
-  -t, --type <glob>       Limit filenames (e.g. '*.c,*.h,*.py')
-  -r, --replace <string>  Replace search pattern with string
-  -n, --name              Match and replace in filenames instead of contents
-      --dirs              Restrict renaming to directories only
-      --exclude <glob>    Exclude files/dirs matching glob (can be repeated)
-      --apply             Actually perform changes (default is dry-run)
-      --backup            Make .bak backups before replacing
-      --diff              Show diff preview of changes instead of updating
-      --context N         Show N lines of context around matches
-      --count             Only print counts of matches per file
-      --summary           Print summary report at end
-      --first             Stop after first match
-      --binary            Allow binary files (default: skip them)
-  -h, --help              Show this help
-
-Examples:
-  $0 foo src/                               # search 'foo' in files
-  $0 -i bar .                               # case-insensitive search for 'bar'
-  $0 -E 'foo[0-9]+' src/                    # regex search
-  $0 -t '*.c,*.h' baz src/                  # search in C source files only
-  $0 -r newfoo oldfoo src/ --backup         # replace with backups
-  $0 -r newfoo oldfoo --apply --diff        # show diff before applying
-  $0 -n -r newname oldname .                # rename files
-  $0 foo . --exclude '*.log' --context 2    # skip logs, show 2 lines of context
-EOF
-    exit 1
-}
-
-# defaults
-IGNORE_CASE=0
-REGEX=0
-TYPES=""
-REPLACE=""
-APPLY=0
-NAME_MODE=0
-DIRS_ONLY=0
-EXCLUDES=(".git/*" "node_modules/*" "__pycache__/*")  # default excludes
-BACKUP=0
-DIFF=0
-CONTEXT=0
-COUNT=0
-SUMMARY=0
-FIRST=0
-ALLOW_BINARY=0
-
-ARGS=()
+# --- Parse CLI Args ---
+search_term=""
+replace_term=""
+target_dir="."
+ignore_case=false
+editor_open=false
+output_file=""
+include_old=false
+apply_changes=false
+backup_files=false
+show_diff=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i|--ignore-case) IGNORE_CASE=1 ;;
-        -E|--regex) REGEX=1 ;;
-        -t|--type) TYPES=$2; shift ;;
-        -r|--replace) REPLACE=$2; shift ;;
-        -n|--name) NAME_MODE=1 ;;
-        --dirs) DIRS_ONLY=1 ;;
-        --exclude) EXCLUDES+=("$2"); shift ;;
-        --apply) APPLY=1 ;;
-        --backup) BACKUP=1 ;;
-        --diff) DIFF=1 ;;
-        --context) CONTEXT=$2; shift ;;
-        --count) COUNT=1 ;;
-        --summary) SUMMARY=1 ;;
-        --first) FIRST=1 ;;
-        --binary) ALLOW_BINARY=1 ;;
-        -h|--help) usage ;;
-        *) ARGS+=("$1") ;;
+        -i|--ignore-case) ignore_case=true ;;
+        -o|--output) output_file="$2"; shift ;;
+        -e|--editor) editor_open=true ;;
+        -d|--dir) target_dir="$2"; shift ;;
+        -r|--replace) replace_term="$2"; shift ;;
+        --apply) apply_changes=true ;;
+        --backup) backup_files=true ;;
+        --diff) show_diff=true ;;
+        --include-old) include_old=true ;;
+        --help) 
+            echo "Usage: deepsearch [options] <search_term> [replace_term]"
+            echo "Options:"
+            echo "  -i, --ignore-case     Case-insensitive search"
+            echo "  -o, --output <file>   Save results to file"
+            echo "  -e, --editor          Enable editor clickable output"
+            echo "  -d, --dir <folder>    Target directory (default: current)"
+            echo "  -r, --replace <text>  Replace search_term with this text"
+            echo "  --apply               Actually perform replacements (default: dry-run)"
+            echo "  --backup              Create .bak backups before replacing"
+            echo "  --diff                Show diff preview of changes"
+            echo "  --include-old         Include old/ folders (default: excluded)"
+            echo ""
+            echo "Examples:"
+            echo "  ds myfunction                                    # search for 'myfunction'"
+            echo "  ds -r newfunction myfunction --apply             # replace 'myfunction' with 'newfunction'"
+            echo "  ds components.img_debug method.img_debug --apply # rename components.img_debug to method.img_debug"
+            echo "  ds -r newname oldname --backup --apply           # replace with backup"
+            exit 0
+            ;;
+        *) 
+            if [[ -z "$search_term" && "$1" != -* ]]; then
+                search_term="$1"
+            elif [[ -z "$replace_term" && -n "$search_term" && "$1" != -* ]]; then
+                replace_term="$1"
+            elif [[ -d "$1" ]]; then
+                target_dir="$1"
+            fi
+            ;;
     esac
     shift
 done
 
-if [[ ${#ARGS[@]} -lt 1 ]]; then
-    usage
-fi
-
-PATTERN=${ARGS[0]}
-ROOT=${ARGS[1]:-.}
-
-# grep options
-GREP_OPTS="-rn --color=always"
-[[ $IGNORE_CASE -eq 1 ]] && GREP_OPTS="$GREP_OPTS -i"
-[[ $REGEX -eq 0 ]] && GREP_OPTS="$GREP_OPTS -F"  # literal search
-[[ $CONTEXT -gt 0 ]] && GREP_OPTS="$GREP_OPTS -C $CONTEXT"
-[[ $COUNT -eq 1 ]] && GREP_OPTS="$GREP_OPTS -c"
-
-# build find filters
-FIND_EXPR=(-type f)
-if [[ -n $TYPES ]]; then
-    IFS=',' read -ra exts <<< "$TYPES"
-    FIND_EXPR=()
-    for ext in "${exts[@]}"; do
-        FIND_EXPR+=(-name "$ext" -o)
-    done
-    unset 'FIND_EXPR[${#FIND_EXPR[@]}-1]'
-fi
-
-for excl in "${EXCLUDES[@]}"; do
-    FIND_EXPR+=(-not -path "$excl")
-done
-
-# tracking for summary
-MODIFIED=0
-MATCHES=0
-SCANNED=0
-
-# --- Replace Features ---
-if [[ -n $REPLACE ]]; then
-    if [[ $NAME_MODE -eq 1 ]]; then
-        # filename replace
-        echo ">>> Renaming files matching '$PATTERN' -> '$REPLACE'"
-        find "$ROOT" -depth -name "*$PATTERN*" \( "${FIND_EXPR[@]}" \) -print0 \
-          | while IFS= read -r -d '' f; do
-              [[ $DIRS_ONLY -eq 1 && ! -d $f ]] && continue
-              newname=$(echo "$f" | sed "s/${PATTERN}/${REPLACE}/g")
-              if [[ $APPLY -eq 1 ]]; then
-                  mv -v "$f" "$newname"
-                  ((MODIFIED++))
-              else
-                  echo "Would rename: $f -> $newname"
-              fi
-            done
-    else
-        # inside file replace
-        echo ">>> Replacing '$PATTERN' -> '$REPLACE' in files under $ROOT"
-        find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 \
-          | while IFS= read -r -d '' f; do
-              [[ $ALLOW_BINARY -eq 0 && $(file -b --mime "$f") =~ binary ]] && continue
-              if grep -q -- "$PATTERN" "$f"; then
-                  ((MATCHES++))
-                  if [[ $APPLY -eq 1 ]]; then
-                      [[ $BACKUP -eq 1 ]] && cp "$f" "$f.bak"
-                      if [[ $DIFF -eq 1 ]]; then
-                          sed "s/${PATTERN}/${REPLACE}/g" "$f" | diff -u "$f" - || true
-                      else
-                          sed -i "s/${PATTERN}/${REPLACE}/g" "$f"
-                          echo "Updated: $f"
-                          ((MODIFIED++))
-                      fi
-                  else
-                      echo "Would update: $f"
-                  fi
-                  [[ $FIRST -eq 1 ]] && exit 0
-              fi
-          done
+# --- GUI fallback if invoked from Dolphin ---
+if [[ -z "$search_term" && -n "$target_dir" && "$target_dir" != "." ]]; then
+    search_term=$(kdialog --inputbox "Enter search term:" "Deep Search")
+    [[ -z "$search_term" ]] && exit 1
+    
+    # Ask for replace if user wants it
+    if kdialog --yesno "Do you want to replace the search term?"; then
+        replace_term=$(kdialog --inputbox "Enter replacement text:" "Replace")
     fi
-    [[ $SUMMARY -eq 1 ]] && echo "Summary: $MATCHES matches, $MODIFIED files modified."
+fi
+
+# --- Ensure search term exists ---
+if [[ -z "$search_term" ]]; then
+    echo "Usage: deepsearch [options] <search_term> [replace_term]"
+    echo "Use --help for detailed options"
+    exit 1
+fi
+
+# --- If replace_term is provided via -r flag, use that ---
+if [[ -n "$2" && -z "$replace_term" ]]; then
+    replace_term="$2"
+fi
+
+# --- Build exclude directories ---
+exclude_dirs=".git,__pycache__,.vscode,.idea,node_modules"
+if ! $include_old; then
+    exclude_dirs+=",old"
+fi
+
+# --- Build grep flags ---
+grep_flags="-rn"
+$ignore_case && grep_flags+="i"
+
+# --- Build find exclude patterns ---
+find_excludes=()
+if ! $include_old; then
+    find_excludes+=(-not -path "*/old/*")
+fi
+find_excludes+=(-not -path "*/.git/*" -not -path "*/__pycache__/*" -not -path "*/.vscode/*" -not -path "*/.idea/*" -not -path "*/node_modules/*")
+
+# --- Replace Mode ---
+if [[ -n "$replace_term" ]]; then
+    echo "🔄 Replace mode: \"$search_term\" → \"$replace_term\" in $target_dir"
+    if ! $apply_changes; then
+        echo "🔍 DRY RUN - Use --apply to actually make changes"
+    fi
+    if ! $include_old; then
+        echo "📁 Excluding: old/ folders (use --include-old to include)"
+    fi
+    echo
+
+    # Track changes
+    files_to_rename=()
+    files_to_modify=()
+
+    # 1. Find files to rename (filename contains search term)
+    echo "📝 Files to rename:"
+    while IFS= read -r -d '' file; do
+        if [[ $(basename "$file") == *"$search_term"* ]]; then
+            new_name=$(echo "$file" | sed "s|$search_term|$replace_term|g")
+            files_to_rename+=("$file|$new_name")
+            if $apply_changes; then
+                if $backup_files && [[ -f "$file" ]]; then
+                    cp "$file" "$file.bak"
+                    echo "  ✅ Backed up: $file.bak"
+                fi
+                mv "$file" "$new_name"
+                echo "  ✅ Renamed: $file → $new_name"
+            else
+                echo "  Would rename: $file → $new_name"
+            fi
+        fi
+    done < <(find "$target_dir" -type f "${find_excludes[@]}" -print0 2>/dev/null)
+
+    echo
+
+    # 2. Find files to modify (content contains search term)
+    echo "📄 Files with content to modify:"
+    
+    if $ignore_case; then
+        grep_search_flags="-rni"
+    else
+        grep_search_flags="-rn"
+    fi
+
+    # Use a more robust approach to avoid the grep/pipe subshell issue
+    temp_file=$(mktemp)
+    if $include_old; then
+        grep $grep_search_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null | cut -d: -f1 | sort -u > "$temp_file"
+    else
+        grep $grep_search_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null | grep -v "/old/" | cut -d: -f1 | sort -u > "$temp_file"
+    fi
+
+    while IFS= read -r file; do
+        [[ -z "$file" || ! -f "$file" ]] && continue
+        
+        files_to_modify+=("$file")
+        
+        if $apply_changes; then
+            if $backup_files; then
+                cp "$file" "$file.bak"
+                echo "  ✅ Backed up: $file.bak"
+            fi
+            
+            if $show_diff; then
+                echo "  📋 Diff for $file:"
+                if $ignore_case; then
+                    sed "s/$search_term/$replace_term/gi" "$file" | diff -u "$file" - || true
+                else
+                    sed "s/$search_term/$replace_term/g" "$file" | diff -u "$file" - || true
+                fi
+            fi
+            
+            # Apply the replacement
+            if $ignore_case; then
+                sed -i "s/$search_term/$replace_term/gi" "$file"
+            else
+                sed -i "s/$search_term/$replace_term/g" "$file"
+            fi
+            echo "  ✅ Modified: $file"
+        else
+            echo "  Would modify: $file"
+            if $show_diff; then
+                echo "  📋 Preview diff:"
+                if $ignore_case; then
+                    sed "s/$search_term/$replace_term/gi" "$file" | diff -u "$file" - || true
+                else
+                    sed "s/$search_term/$replace_term/g" "$file" | diff -u "$file" - || true
+                fi
+            fi
+        fi
+    done < "$temp_file"
+    
+    rm -f "$temp_file"
+
+    echo
+    echo "📊 Summary:"
+    echo "  Files to rename: ${#files_to_rename[@]}"
+    echo "  Files to modify: ${#files_to_modify[@]}"
+    
+    if ! $apply_changes; then
+        echo ""
+        echo "💡 To apply these changes, add --apply flag"
+        echo "💡 To create backups, add --backup flag"
+        echo "💡 To preview diffs, add --diff flag"
+    fi
+
     exit 0
 fi
 
-# --- Classic deepsearch behavior ---
-echo ">>> Searching for '$PATTERN' under $ROOT"
-find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 \
-  | while IFS= read -r -d '' f; do
-      [[ $ALLOW_BINARY -eq 0 && $(file -b --mime "$f") =~ binary ]] && continue
-      ((SCANNED++))
-      if grep $GREP_OPTS -- "$PATTERN" "$f"; then
-          ((MATCHES++))
-          [[ $FIRST -eq 1 ]] && exit 0
-      fi
-    done
+# --- Original Search Mode ---
+result=$(mktemp)
 
-[[ $SUMMARY -eq 1 ]] && echo "Summary: $SCANNED files scanned, $MATCHES matches."
+{
+    echo "🔍 Searching for: \"$search_term\" in $target_dir"
+    if ! $include_old; then
+        echo "📁 Excluding: old/ folders (use --include-old to include)"
+    fi
+    echo
+
+    echo "📁 Files with name containing \"$search_term\":"
+    if $include_old; then
+        find "$target_dir" -type f -iname "*$search_term*" 2>/dev/null || echo "None"
+    else
+        find "$target_dir" -type f -iname "*$search_term*" "${find_excludes[@]}" 2>/dev/null || echo "None"
+    fi
+    echo
+
+    echo "📄 Files with contents containing \"$search_term\":"
+    if $include_old; then
+        grep $grep_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null || echo "None"
+    else
+        grep $grep_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null | grep -v "/old/" || echo "None"
+    fi
+} | tee "$result"
+
+# --- Save to file if requested ---
+if [[ -n "$output_file" ]]; then
+    cp "$result" "$output_file"
+    echo -e "\n💾 Saved to: $output_file"
+fi
+
+# --- Editor clickable lines ---
+if $editor_open; then
+    echo -e "\n🖱 Opening matches in $DEFAULT_EDITOR..."
+    if $include_old; then
+        grep $grep_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null | while IFS=: read -r file line _; do
+            [[ -f "$file" && "$line" =~ ^[0-9]+$ ]] && "$DEFAULT_EDITOR" "$file" -l "$line" &
+        done
+    else
+        grep $grep_flags --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} "$search_term" "$target_dir" 2>/dev/null | grep -v "/old/" | while IFS=: read -r file line _; do
+            [[ -f "$file" && "$line" =~ ^[0-9]+$ ]] && "$DEFAULT_EDITOR" "$file" -l "$line" &
+        done
+    fi
+fi
+
+# --- GUI output if Dolphin (kdialog) mode ---
+if [[ "$target_dir" != "." && -n "$DISPLAY" && -n "$(which kdialog)" ]]; then
+    kdialog --textbox "$result" 800 600
+fi
+
+rm -f "$result"
