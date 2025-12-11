@@ -13,26 +13,26 @@ Usage: $0 [options] <pattern> [replacement] [path]
 
 SEARCH MODES:
   Default behavior searches BOTH filenames and file contents
-  
+
 OPTIONS:
   -i, --ignore-case       Case-insensitive search
   -E, --regex             Treat pattern as regex (default: literal string)
   -t, --type <glob>       Limit to specific file types (e.g. '*.c,*.h,*.py')
   -n, --name-only         Search filenames only
   -c, --content-only      Search file contents only
-  
+
 REPLACE OPTIONS:
   -r, --replace <string>  Replace pattern with string
   --apply                 Actually perform changes (default: dry-run)
   --backup                Create .bak backups before replacing
   --diff                  Show diff preview of changes
-  
+
 FILTERING:
   --exclude <glob>        Exclude files/dirs matching glob (can be repeated)
   --include-old           Include old/ folders (default: excluded)
   --binary                Allow binary files (default: skip them)
   --dirs                  Include directories in filename search
-  
+
 OUTPUT:
   --context N             Show N lines of context around matches
   --count                 Only print counts of matches per file
@@ -40,8 +40,12 @@ OUTPUT:
   --first                 Stop after first match
   -o, --output <file>     Save results to file
   -e, --editor            Open matches in editor ($DEFAULT_EDITOR)
-  
+
   -h, --help              Show this help
+
+Line Viewing:
+  -l, --line <N>          Show line N from found files
+  --line-context <N>      Show N lines of context around line
 
 EXAMPLES:
   $0 myfunction                                    # search 'myfunction' in names AND contents
@@ -51,6 +55,7 @@ EXAMPLES:
   $0 -r newname oldname --apply --backup           # replace with backups
   $0 foo --exclude '*.log' --context 2             # exclude logs, show context
   $0 -t '*.py,*.js' function_name                  # search in Python/JS files only
+  $0 foo -l 100 --line-context 5                   # search and show line 100 ±5 lines
 
 POSITIONAL REPLACEMENT:
   $0 old_name new_name --apply     # Replaces 'old_name' with 'new_name'
@@ -78,6 +83,9 @@ FIRST=0
 ALLOW_BINARY=0
 OUTPUT_FILE=""
 EDITOR_OPEN=0
+SHOW_LINE=0
+LINE_NUMBER=""
+LINE_CONTEXT=0
 
 ARGS=()
 
@@ -101,6 +109,8 @@ while [[ $# -gt 0 ]]; do
         --summary) SUMMARY=1 ;;
         --first) FIRST=1 ;;
         --binary) ALLOW_BINARY=1 ;;
+        -l|--line) SHOW_LINE=1; LINE_NUMBER="$2"; shift ;;
+        --line-context) LINE_CONTEXT="$2"; shift ;;
         -o|--output) OUTPUT_FILE=$2; shift ;;
         -e|--editor) EDITOR_OPEN=1 ;;
         -h|--help) usage ;;
@@ -111,7 +121,10 @@ done
 
 # --- Handle Arguments ---
 if [[ ${#ARGS[@]} -lt 1 ]]; then
-    usage
+    echo "Error: Missing search pattern"
+    echo "Usage: $(basename $0) [options] <pattern> [replacement] [path]"
+    echo "Use --help for more information"
+    exit 1
 fi
 
 PATTERN=${ARGS[0]}
@@ -128,57 +141,34 @@ if [[ $INCLUDE_OLD -eq 0 ]]; then
     EXCLUDES+=("old/*" "*/old/*")
 fi
 
-# --- Setup temporary files for counters ---
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
-MATCHES_FILE="$TEMP_DIR/matches"
-MODIFIED_FILE="$TEMP_DIR/modified"
-SCANNED_FILE="$TEMP_DIR/scanned"
-echo "0" > "$MATCHES_FILE"
-echo "0" > "$MODIFIED_FILE"
-echo "0" > "$SCANNED_FILE"
-
-# --- Setup output redirection ---
-if [[ -n "$OUTPUT_FILE" ]]; then
-    exec > >(tee "$OUTPUT_FILE")
-fi
-
-# --- Build grep options ---
-GREP_OPTS="-n --color=always"
-[[ $IGNORE_CASE -eq 1 ]] && GREP_OPTS="$GREP_OPTS -i"
-[[ $REGEX -eq 0 ]] && GREP_OPTS="$GREP_OPTS -F"
-[[ $CONTEXT -gt 0 ]] && GREP_OPTS="$GREP_OPTS -C $CONTEXT"
-[[ $COUNT -eq 1 ]] && GREP_OPTS="$GREP_OPTS -c"
-
 # --- Build find expression ---
-FIND_EXPR=(-type f)
-if [[ -n $TYPES ]]; then
-    IFS=',' read -ra exts <<< "$TYPES"
-    FIND_EXPR=()
-    for ext in "${exts[@]}"; do
-        FIND_EXPR+=(-name "$ext" -o)
-    done
-    unset 'FIND_EXPR[${#FIND_EXPR[@]}-1]'
-fi
-
+FIND_EXPR=()
 for excl in "${EXCLUDES[@]}"; do
-    FIND_EXPR+=(-not -path "*$excl")
+    FIND_EXPR+=(-not -path "*/$excl")
 done
 
-# --- Helper Functions ---
+# --- Build grep options ---
+GREP_OPTS=""
+[[ $IGNORE_CASE -eq 1 ]] && GREP_OPTS+="-i "
+[[ $REGEX -eq 0 ]] && GREP_OPTS+="-F "
+GREP_OPTS+="-n"
+
+# --- Helper functions ---
 increment_counter() {
     local file=$1
-    echo $(($(cat "$file") + 1)) > "$file"
+    local count=$(cat "$file")
+    echo $((count + 1)) > "$file"
 }
 
 is_binary() {
-    local file=$1
-    [[ $ALLOW_BINARY -eq 0 ]] && file -b --mime "$file" 2>/dev/null | grep -q binary
+    [[ $ALLOW_BINARY -eq 1 ]] && return 1
+    file --mime "$1" 2>/dev/null | grep -q "charset=binary"
 }
 
 matches_pattern() {
     local text=$1
     local pattern=$2
+
     if [[ $REGEX -eq 1 ]]; then
         if [[ $IGNORE_CASE -eq 1 ]]; then
             echo "$text" | grep -E -i "$pattern" >/dev/null 2>&1
@@ -198,12 +188,12 @@ apply_replacement() {
     local file=$1
     local pattern=$2
     local replacement=$3
-    
+
     if [[ $BACKUP -eq 1 ]]; then
         cp "$file" "$file.bak"
         echo "  💾 Backed up: $file.bak"
     fi
-    
+
     if [[ $DIFF -eq 1 ]]; then
         echo "  📋 Diff for $file:"
         if [[ $REGEX -eq 1 ]]; then
@@ -222,7 +212,7 @@ apply_replacement() {
             fi
         fi
     fi
-    
+
     # Apply the replacement
     if [[ $REGEX -eq 1 ]]; then
         if [[ $IGNORE_CASE -eq 1 ]]; then
@@ -240,6 +230,60 @@ apply_replacement() {
         fi
     fi
 }
+
+# --- Setup temporary files for counters ---
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+MATCHES_FILE="$TEMP_DIR/matches"
+MODIFIED_FILE="$TEMP_DIR/modified"
+SCANNED_FILE="$TEMP_DIR/scanned"
+echo "0" > "$MATCHES_FILE"
+echo "0" > "$MODIFIED_FILE"
+echo "0" > "$SCANNED_FILE"
+
+# --- Setup output redirection ---
+if [[ -n "$OUTPUT_FILE" ]]; then
+    exec > >(tee "$OUTPUT_FILE")
+fi
+
+# --- Line Viewing Mode ---
+if [[ $SHOW_LINE -eq 1 && -n "$LINE_NUMBER" ]]; then
+    echo "📍 Showing line $LINE_NUMBER from files containing \"$PATTERN\""
+    if [[ $LINE_CONTEXT -gt 0 ]]; then
+        echo "📄 Context: ±$LINE_CONTEXT lines"
+    fi
+    echo ""
+
+    temp_file=$(mktemp)
+
+    # Find files containing pattern
+    find "$ROOT" \( "${FIND_EXPR[@]}" \) -type f -print0 2>/dev/null \
+      | while IFS= read -r -d '' file; do
+          is_binary "$file" && continue
+          if grep -l $GREP_OPTS "$PATTERN" "$file" 2>/dev/null; then
+              echo "$file" >> "$temp_file"
+          fi
+        done
+
+    while IFS= read -r file; do
+        [[ -z "$file" || ! -f "$file" ]] && continue
+
+        echo "═══ $file ═══"
+
+        if [[ $LINE_CONTEXT -gt 0 ]]; then
+            start_line=$((LINE_NUMBER - LINE_CONTEXT))
+            [[ $start_line -lt 1 ]] && start_line=1
+            end_line=$((LINE_NUMBER + LINE_CONTEXT))
+            sed -n "${start_line},${end_line}p" "$file" 2>/dev/null | nl -v $start_line -w 6 -s ": " || echo "  (line out of range)"
+        else
+            sed -n "${LINE_NUMBER}p" "$file" 2>/dev/null | sed "s/^/[line $LINE_NUMBER] /" || echo "  (line out of range)"
+        fi
+        echo ""
+    done < "$temp_file"
+
+    rm -f "$temp_file"
+    exit 0
+fi
 
 # --- REPLACE MODE ---
 if [[ -n $REPLACE ]]; then
@@ -267,7 +311,7 @@ if [[ -n $REPLACE ]]; then
                       newname=$(echo "$filename" | sed "s/${PATTERN}/${REPLACE}/g")
                   fi
                   newpath="$(dirname "$f")/$newname"
-                  
+
                   if [[ $APPLY -eq 1 ]]; then
                       mv "$f" "$newpath"
                       echo "  ✅ Renamed: $f → $newpath"
@@ -289,23 +333,9 @@ if [[ -n $REPLACE ]]; then
           | while IFS= read -r -d '' f; do
               is_binary "$f" && continue
               increment_counter "$SCANNED_FILE"
-              
+
               # Check if file contains pattern
-              if [[ $REGEX -eq 1 ]]; then
-                  if [[ $IGNORE_CASE -eq 1 ]]; then
-                      grep_check="grep -E -i"
-                  else
-                      grep_check="grep -E"
-                  fi
-              else
-                  if [[ $IGNORE_CASE -eq 1 ]]; then
-                      grep_check="grep -F -i"
-                  else
-                      grep_check="grep -F"
-                  fi
-              fi
-              
-              if $grep_check -q "$PATTERN" "$f" 2>/dev/null; then
+              if grep -q $GREP_OPTS "$PATTERN" "$f" 2>/dev/null; then
                   increment_counter "$MATCHES_FILE"
                   if [[ $APPLY -eq 1 ]]; then
                       apply_replacement "$f" "$PATTERN" "$REPLACE"
@@ -327,7 +357,7 @@ if [[ -n $REPLACE ]]; then
     echo "  Files scanned: $(cat "$SCANNED_FILE")"
     echo "  Matches found: $(cat "$MATCHES_FILE")"
     echo "  Files modified: $(cat "$MODIFIED_FILE")"
-    
+
     if [[ $APPLY -eq 0 ]]; then
         echo
         echo "💡 To apply changes: add --apply"
@@ -349,12 +379,12 @@ if [[ $NAME_ONLY -eq 0 && $CONTENT_ONLY -eq 0 ]]; then
           [[ $DIRS_INCLUDE -eq 0 && -d $f ]] && continue
           filename=$(basename "$f")
           if matches_pattern "$filename" "$PATTERN"; then
-              echo "FILENAME: $f"
+              echo "$f"
               increment_counter "$MATCHES_FILE"
               [[ $FIRST -eq 1 ]] && exit 0
           fi
         done
-    
+
     echo
     echo "=== 📄 CONTENT MATCHES ==="
     find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
@@ -375,7 +405,7 @@ elif [[ $NAME_ONLY -eq 1 ]]; then
           [[ $DIRS_INCLUDE -eq 0 && -d $f ]] && continue
           filename=$(basename "$f")
           if matches_pattern "$filename" "$PATTERN"; then
-              echo "FILENAME: $f"
+              echo "$f"
               increment_counter "$MATCHES_FILE"
               [[ $FIRST -eq 1 ]] && exit 0
           fi
@@ -402,9 +432,9 @@ if [[ $EDITOR_OPEN -eq 1 ]]; then
     find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
       | while IFS= read -r -d '' f; do
           is_binary "$f" && continue
-          if grep -l $([[ $IGNORE_CASE -eq 1 ]] && echo "-i") $([[ $REGEX -eq 0 ]] && echo "-F") "$PATTERN" "$f" 2>/dev/null; then
+          if grep -l $GREP_OPTS "$PATTERN" "$f" 2>/dev/null; then
               # Get line numbers and open in editor
-              grep -n $([[ $IGNORE_CASE -eq 1 ]] && echo "-i") $([[ $REGEX -eq 0 ]] && echo "-F") "$PATTERN" "$f" 2>/dev/null | head -1 | while IFS=: read -r line _; do
+              grep -n $GREP_OPTS "$PATTERN" "$f" 2>/dev/null | head -1 | while IFS=: read -r line _; do
                   [[ "$line" =~ ^[0-9]+$ ]] && "$DEFAULT_EDITOR" "$f" -l "$line" &
               done
           fi
