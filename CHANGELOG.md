@@ -39,3 +39,25 @@
 
 - Initial versions: grep wrapper with basic filename and content search
 - Moved to GitHub repository
+
+---
+
+## v1.5 — April 2026
+
+**New: Color search mode** (`-k` / `--colors`):
+- `ds -k '#2a2a2a'` — find every file and line using a hex color, with
+  automatic detection of which theme key it's a fallback for
+- `ds -k '#2a2a2a' '#1e1e2e' --apply` — replace a color everywhere
+- Shows a terminal color swatch for the searched color
+
+**New: Theme key mode** (`--theme <key>`):
+- `ds --theme bg_primary` — show the value of a theme key across all JSON
+  theme files, with color swatches
+
+**New: KDE color mode** (`--kde`):
+- Reads `~/.config/kdeglobals` and compares KDE color roles to theme keys
+- Shows which KDE roles match which theme keys and their hex values
+
+**New: Unique colors mode** (`--unique`):
+- `ds --unique .` — list all unique hex color values found across files,
+  sorted by frequency, with color swatches

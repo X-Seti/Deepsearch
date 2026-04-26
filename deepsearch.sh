@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# X-Seti - deepsearch v1.4 - Unified search and replace tool
+# X-Seti - deepsearch v1.5 - Unified search, replace, and color analysis tool
 # Searches filenames AND file contents by default, with extensive replace capabilities
 
 set -euo pipefail
-VERS="1.4"
+VERS="1.5"
 APP_NAME="Deepsearch"
-DATE="January 2026"
+DATE="April 2026"
 
 # --- Color Definitions ---
 if [[ -t 1 ]]; then
@@ -44,44 +44,50 @@ SEARCH MODES:
 OPTIONS:
   -i, --ignore-case       Case-insensitive search
   -E, --regex             Treat pattern as regex (default: literal string)
-  -t, --type <glob>       Limit to file types (e.g. '*.c,*.h,*.py')
+  -t, --type <glob>       Limit to file types (e.g. '*.py,*.json')
   -n, --name-only         Search filenames only
-  -f, --find              Search filenames or name in file
+  -f, --find              Find files by name
   -c, --content-only      Search file contents only
-  -v, --version           Show script version ($APP_NAME - $VERS)
+  -v, --version           Show version
 
 REPLACE OPTIONS:
   -r, --replace <string>  Replace pattern with string
-  --apply                 Actually perform changes (default: dry-run)
+  --apply                 Apply changes (default: dry-run)
   --backup                Create .bak backups before replacing
-  --diff                  Show diff preview of changes
+  --diff                  Show unified diff preview
+
+COLOR / THEME OPTIONS:
+  -k, --colors <hex>             Find all uses of a hex color (e.g. '#2a2a2a')
+  -k, --colors <hex> <new_hex>   Replace a color value (dry-run by default)
+      --apply                    Apply color replacement
+      --theme <key>              Show value of a theme key across all JSON files
+      --kde                      Compare KDE color roles with theme keys
+      --unique                   Show unique hex color values found in matches
 
 FILTERING:
-  --exclude <glob>        Exclude files/dirs matching glob (repeatable)
-  --include-old           Include old/ folders (default: excluded)
-  --binary                Allow binary files (default: skip them)
+  --exclude <glob>        Exclude files/dirs (repeatable)
+  --include-old           Include old/ folders (excluded by default)
+  --binary                Allow binary files (skipped by default)
   --dirs                  Include directories in filename search
 
 OUTPUT:
   --context N             Show N lines of context around matches
-  --count                 Only print counts of matches per file
-  --summary               Print summary report at end
+  --count                 Print match counts per file only
   --first                 Stop after first match
   -o, --output <file>     Save results to file
   -e, --editor            Open matches in editor ($DEFAULT_EDITOR)
+  -l, --line <N>          Show line N from matched files
+  -C <N>                  Lines of context around --line
   -h, --help              Show this help
 
-Line Viewing:
-  -l, --line <N>          Show line N from found files
-  -C, --context <N>       Show N lines of context around line
-
 EXAMPLES:
-  $0 myfunction                        # search names AND contents
-  $0 -n config                         # filenames only
-  $0 -c "debug.*print" -E              # regex in contents only
-  $0 oldname newname --apply --backup  # replace with backups
-  $0 foo --exclude '*.log' --context 2
-  $0 -t '*.py,*.js' function_name
+  $0 myfunction                             # search names AND contents
+  $0 oldname newname --apply --backup       # replace with backups
+  $0 -k '#2a2a2a'                           # find all uses of a color
+  $0 -k '#2a2a2a' '#1e1e2e' --apply        # replace a color everywhere
+  $0 --theme bg_primary                     # show key across all themes
+  $0 --kde                                  # compare KDE palette to themes
+  $0 --unique -c '#' -t '*.py'             # list all hex colors in Python files
 EOF
     exit 1
 }
@@ -101,16 +107,20 @@ BACKUP=0
 DIFF=0
 CONTEXT=0
 COUNT=0
-SUMMARY=0
 FIRST=0
 ALLOW_BINARY=0
 OUTPUT_FILE=""
 EDITOR_OPEN=0
-FINDWORD=0
 show_line=false
 line_number=""
 line_context=0
 SHOW_VERSION=0
+COLOR_MODE=0
+COLOR_HEX=""
+COLOR_NEW=""
+THEME_KEY=""
+KDE_MODE=0
+UNIQUE_MODE=0
 
 ARGS=()
 
@@ -121,7 +131,7 @@ while [[ $# -gt 0 ]]; do
         -E|--regex)        REGEX=1 ;;
         -t|--type)         TYPES=$2; shift ;;
         -r|--replace)      REPLACE=$2; shift ;;
-        -f|--find)         FINDWORD=1; ARGS+=("$2"); shift ;;
+        -f|--find)         ARGS+=("$2"); shift ;;
         -n|--name-only)    NAME_ONLY=1 ;;
         -c|--content-only) CONTENT_ONLY=1 ;;
         -v|--version)      SHOW_VERSION=1 ;;
@@ -133,13 +143,17 @@ while [[ $# -gt 0 ]]; do
         --diff)            DIFF=1 ;;
         --context)         CONTEXT=$2; shift ;;
         --count)           COUNT=1 ;;
-        --summary)         SUMMARY=1 ;;
         --first)           FIRST=1 ;;
         --binary)          ALLOW_BINARY=1 ;;
         -l|--line)         show_line=true; line_number="$2"; shift ;;
         -C)                line_context="$2"; shift ;;
         -o|--output)       OUTPUT_FILE=$2; shift ;;
         -e|--editor)       EDITOR_OPEN=1 ;;
+        -k|--colors)       COLOR_MODE=1; COLOR_HEX="$2"; shift
+                           [[ $# -gt 0 && "${2:-}" == "#"* ]] && { COLOR_NEW="$2"; shift; } ;;
+        --theme)           THEME_KEY="$2"; shift ;;
+        --kde)             KDE_MODE=1 ;;
+        --unique)          UNIQUE_MODE=1 ;;
         -h|--help)         usage ;;
         *)                 ARGS+=("$1") ;;
     esac
@@ -152,50 +166,10 @@ if [[ $SHOW_VERSION -eq 1 ]]; then
     exit 0
 fi
 
-# --- Ensure search term ---
-if [[ ${#ARGS[@]} -lt 1 ]]; then
-    echo "Usage: ds [options] <search_term> [replace_term] [path]"
-    echo "Use --help for detailed options"
-    exit 1
-fi
-
-# --- Set PATTERN, REPLACE, ROOT from positional args ---
-PATTERN="${ARGS[0]}"
-
-# ARGS[1] is replacement if it doesn't look like a path and -r wasn't set
-if [[ ${#ARGS[@]} -ge 2 && -z "$REPLACE" && "${ARGS[1]}" != ./* && ! -d "${ARGS[1]}" ]]; then
-    REPLACE="${ARGS[1]}"
-    ROOT="${ARGS[2]:-.}"
-else
-    ROOT="${ARGS[1]:-.}"
-fi
-
-# --- Add default excludes ---
-if [[ $INCLUDE_OLD -eq 0 ]]; then
-    EXCLUDES+=("old/*" "*/old/*")
-fi
-
-# --- Build find exclude expression ---
-FIND_EXPR=(-type f)
-if [[ -n $TYPES ]]; then
-    IFS=',' read -ra exts <<< "$TYPES"
-    type_expr=()
-    for ext in "${exts[@]}"; do
-        type_expr+=(-name "$ext" -o)
-    done
-    unset 'type_expr[${#type_expr[@]}-1]'
-    FIND_EXPR=(\( "${type_expr[@]}" \) -type f)
-fi
-
-for excl in "${EXCLUDES[@]}"; do
-    FIND_EXPR+=(-not -path "*$excl")
-done
-
 # --- Helper Functions ---
 increment_counter() {
     local file=$1
-    local n
-    n=$(cat "$file")
+    local n; n=$(cat "$file")
     echo $((n + 1)) > "$file"
 }
 
@@ -219,41 +193,12 @@ matches_pattern() {
 
 apply_replacement() {
     local file=$1 pattern=$2 replacement=$3
-
-    if [[ $BACKUP -eq 1 ]]; then
-        cp "$file" "$file.bak"
-        echo "  Backed up: $file.bak"
-    fi
-
+    [[ $BACKUP -eq 1 ]] && cp "$file" "$file.bak" && echo "  Backed up: $file.bak"
     if [[ $DIFF -eq 1 ]]; then
         echo "  Diff for $file:"
-        if [[ $REGEX -eq 1 ]]; then
-            [[ $IGNORE_CASE -eq 1 ]] \
-                && sed -E "s/${pattern}/${replacement}/gi" "$file" | diff -u "$file" - || true \
-                || sed -E "s/${pattern}/${replacement}/g"  "$file" | diff -u "$file" - || true
-        else
-            local ep er
-            ep=$(printf '%s\n' "$pattern"     | sed 's/[[\.*^$()+?{|]/\\&/g')
-            er=$(printf '%s\n' "$replacement" | sed 's/[[\.*^$(){}|]/\\&/g')
-            [[ $IGNORE_CASE -eq 1 ]] \
-                && sed "s/${ep}/${er}/gi" "$file" | diff -u "$file" - || true \
-                || sed "s/${ep}/${er}/g"  "$file" | diff -u "$file" - || true
-        fi
+        sed "s|${pattern}|${replacement}|g" "$file" | diff -u "$file" - || true
     fi
-
-    # Apply
-    if [[ $REGEX -eq 1 ]]; then
-        [[ $IGNORE_CASE -eq 1 ]] \
-            && sed -E -i "s/${pattern}/${replacement}/gi" "$file" \
-            || sed -E -i "s/${pattern}/${replacement}/g"  "$file"
-    else
-        local ep er
-        ep=$(printf '%s\n' "$pattern"     | sed 's/[[\.*^$()+?{|]/\\&/g')
-        er=$(printf '%s\n' "$replacement" | sed 's/[[\.*^$(){}|]/\\&/g')
-        [[ $IGNORE_CASE -eq 1 ]] \
-            && sed -i "s/${ep}/${er}/gi" "$file" \
-            || sed -i "s/${ep}/${er}/g"  "$file"
-    fi
+    sed -i "s|${pattern}|${replacement}|g" "$file"
 }
 
 # --- Setup temp counters (AFTER functions defined) ---
@@ -269,21 +214,297 @@ echo "0" > "$SCANNED_FILE"
 # --- Output redirection ---
 [[ -n "$OUTPUT_FILE" ]] && exec > >(tee "$OUTPUT_FILE")
 
+# --- Add default excludes ---
+[[ $INCLUDE_OLD -eq 0 ]] && EXCLUDES+=("old/*" "*/old/*")
+
+# --- Build find expression ---
+FIND_EXPR=(-type f)
+if [[ -n $TYPES ]]; then
+    IFS=',' read -ra exts <<< "$TYPES"
+    type_expr=()
+    for ext in "${exts[@]}"; do type_expr+=(-name "$ext" -o); done
+    unset 'type_expr[${#type_expr[@]}-1]'
+    FIND_EXPR=(\( "${type_expr[@]}" \) -type f)
+fi
+for excl in "${EXCLUDES[@]}"; do
+    FIND_EXPR+=(-not -path "*$excl")
+done
+
+# ===========================================================================
+# THEME KEY MODE  --theme <key>
+# Show the value of a theme key across all JSON theme files
+# ===========================================================================
+if [[ -n "$THEME_KEY" ]]; then
+    ROOT="${ARGS[0]:-.}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Theme key:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$THEME_KEY\"${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo
+
+    found=0
+    while IFS= read -r -d '' f; do
+        # Extract value for key from JSON
+        val=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    c = d.get('colors', d)
+    v = c.get('$THEME_KEY')
+    if v: print(v)
+except: pass
+" 2>/dev/null)
+        if [[ -n "$val" ]]; then
+            # Show a color swatch if it looks like a hex color
+            swatch=""
+            if [[ "$val" =~ ^#[0-9a-fA-F]{6}$ ]]; then
+                r=$((16#${val:1:2}))
+                g=$((16#${val:3:2}))
+                b=$((16#${val:5:2}))
+                swatch="\033[48;2;${r};${g};${b}m   \033[0m"
+            fi
+            name=$(basename "$f" .json)
+            printf "${COLOR_CYAN}%-40s${COLOR_RESET} ${COLOR_BOLD_YELLOW}%-20s${COLOR_RESET} %b\n" \
+                "$name" "$val" "$swatch"
+            ((found++)) || true
+            increment_counter "$MATCHES_FILE"
+        fi
+    done < <(find "$ROOT" -name "*.json" -not -path "*/.git/*" -not -path "*/__pycache__/*" -print0 2>/dev/null)
+
+    echo
+    [[ $found -eq 0 ]] && echo "Key '$THEME_KEY' not found in any theme file."
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "   ${COLOR_CYAN}Themes with key:${COLOR_RESET} ${COLOR_BOLD_WHITE}$(cat "$MATCHES_FILE")${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    exit 0
+fi
+
+# ===========================================================================
+# KDE COLOR MODE  --kde
+# Compare KDE color roles with theme JSON keys
+# ===========================================================================
+if [[ $KDE_MODE -eq 1 ]]; then
+    ROOT="${ARGS[0]:-.}"
+    kdeglobals="${HOME}/.config/kdeglobals"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}KDE Color Roles vs Theme Keys${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo
+
+    # KDE role -> our theme key mapping
+    declare -A KDE_MAP=(
+        ["Colors:Window/BackgroundNormal"]="bg_primary"
+        ["Colors:Window/ForegroundNormal"]="text_primary"
+        ["Colors:Window/ForegroundInactive"]="text_secondary"
+        ["Colors:Button/BackgroundNormal"]="button_normal"
+        ["Colors:Button/ForegroundNormal"]="button_text_color"
+        ["Colors:Selection/BackgroundNormal"]="selection_background"
+        ["Colors:Selection/ForegroundNormal"]="selection_text"
+        ["Colors:Tooltip/BackgroundNormal"]="tooltip_bg"
+        ["Colors:Tooltip/ForegroundNormal"]="tooltip_text"
+        ["Colors:View/BackgroundNormal"]="viewport_bg"
+        ["Colors:View/ForegroundNormal"]="viewport_text"
+        ["Colors:View/BackgroundAlternate"]="alternate_base"
+        ["Colors:Window/DecorationFocus"]="accent_primary"
+        ["Colors:Window/DecorationHover"]="accent_secondary"
+    )
+
+    if [[ ! -f "$kdeglobals" ]]; then
+        echo -e "${COLOR_RED}KDE globals not found: $kdeglobals${COLOR_RESET}"
+        echo "Not running KDE, or file missing."
+        exit 1
+    fi
+
+    printf "${COLOR_BOLD_WHITE}%-35s %-20s %-20s %s${COLOR_RESET}\n" \
+        "KDE Role" "KDE Value" "Theme Key" "Match?"
+    echo "─────────────────────────────────────────────────────────────────────────────"
+
+    for kde_key in "${!KDE_MAP[@]}"; do
+        theme_key="${KDE_MAP[$kde_key]}"
+        section=$(echo "$kde_key" | cut -d/ -f1)
+        role=$(echo "$kde_key" | cut -d/ -f2)
+
+        # Read KDE value (stored as R,G,B)
+        kde_rgb=$(awk -F= "/^\[${section}\]/{f=1} f && /^${role}=/{print \$2; f=0}" \
+            "$kdeglobals" 2>/dev/null | head -1)
+
+        if [[ -n "$kde_rgb" ]]; then
+            # Convert R,G,B to hex
+            IFS=',' read -r r g b <<< "$kde_rgb"
+            kde_hex=$(printf '#%02x%02x%02x' "${r:-0}" "${g:-0}" "${b:-0}" 2>/dev/null)
+            swatch="\033[48;2;${r:-0};${g:-0};${b:-0}m   \033[0m"
+
+            # Find theme key in first JSON file found
+            theme_val=$(find "$ROOT" -name "*.json" -not -path "*/.git/*" 2>/dev/null | \
+                head -1 | xargs python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    c = d.get('colors', d)
+    print(c.get('$theme_key', 'not set'))
+except: print('?')
+" 2>/dev/null)
+
+            match="—"
+            [[ "${theme_val,,}" == "${kde_hex,,}" ]] && match="${COLOR_BOLD_GREEN}✓${COLOR_RESET}"
+
+            printf "${COLOR_CYAN}%-35s${COLOR_RESET} %b %-15s  ${COLOR_YELLOW}%-20s${COLOR_RESET} %b  %s\n" \
+                "$role" "$swatch" "$kde_hex" "$theme_key" "$swatch" "$match"
+        fi
+    done
+
+    echo
+    echo -e "${COLOR_DIM}KDE globals: $kdeglobals${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    exit 0
+fi
+
+# ===========================================================================
+# COLOR SEARCH MODE  -k / --colors <hex> [new_hex]
+# Find all uses of a hex color, optionally replace
+# Also shows which theme key the color is used as fallback for
+# ===========================================================================
+if [[ $COLOR_MODE -eq 1 ]]; then
+    ROOT="${ARGS[0]:-.}"
+    hex_lower="${COLOR_HEX,,}"
+    hex_upper="${COLOR_HEX^^}"
+
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Color search:${COLOR_RESET} ${COLOR_BOLD_YELLOW}${COLOR_HEX}${COLOR_RESET}"
+    [[ -n "$COLOR_NEW" ]] && echo -e "${COLOR_BOLD_CYAN}Replace with:${COLOR_RESET} ${COLOR_BOLD_YELLOW}${COLOR_NEW}${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}$ROOT${COLOR_RESET}"
+    [[ -n "$COLOR_NEW" && $APPLY -eq 0 ]] && \
+        echo -e "${COLOR_BOLD_YELLOW}DRY RUN${COLOR_RESET} — add --apply to make changes"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo
+
+    # Show color swatch
+    if [[ "${COLOR_HEX}" =~ ^#[0-9a-fA-F]{6}$ ]]; then
+        r=$((16#${COLOR_HEX:1:2}))
+        g=$((16#${COLOR_HEX:3:2}))
+        b=$((16#${COLOR_HEX:5:2}))
+        echo -e "  Color: \033[48;2;${r};${g};${b}m        \033[0m  ${COLOR_HEX}"
+        echo
+    fi
+
+    find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do
+          is_binary "$f" && continue
+          increment_counter "$SCANNED_FILE"
+
+          # Search case-insensitively for the hex value
+          if grep -qi "$hex_lower\|$hex_upper" "$f" 2>/dev/null; then
+              echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
+
+              # Show matching lines with context about what key it's a fallback for
+              grep -in "$COLOR_HEX" "$f" 2>/dev/null | while IFS=: read -r lineno content; do
+                  # Extract theme key name if this is a .get() fallback pattern
+                  key_hint=""
+                  if echo "$content" | grep -qE "\.get\(|colors\[|theme_colors"; then
+                      key_hint=$(echo "$content" | \
+                          grep -oE "'[a-z_]+',\s*['\"]${COLOR_HEX}['\"]|\"[a-z_]+\",\s*['\"]${COLOR_HEX}['\"]" | \
+                          grep -oE "'[a-z_]+'|\"[a-z_]+\"" | head -1 | tr -d "'\"")
+                      [[ -n "$key_hint" ]] && key_hint=" ${COLOR_MAGENTA}← key: ${key_hint}${COLOR_RESET}"
+                  fi
+                  printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s%b\n" \
+                      "L${lineno}" "$content" "$key_hint"
+              done
+
+              echo -e "${COLOR_CYAN}└─${COLOR_RESET}"
+              increment_counter "$MATCHES_FILE"
+
+              # Apply color replacement if requested
+              if [[ -n "$COLOR_NEW" ]]; then
+                  if [[ $APPLY -eq 1 ]]; then
+                      [[ $BACKUP -eq 1 ]] && cp "$f" "${f}.bak" && echo "  Backed up: ${f}.bak"
+                      # Replace both cases
+                      sed -i "s|${COLOR_HEX}|${COLOR_NEW}|gi" "$f"
+                      echo -e "  ${COLOR_GREEN}Modified:${COLOR_RESET} $f"
+                      increment_counter "$MODIFIED_FILE"
+                  else
+                      echo -e "  ${COLOR_YELLOW}Would replace:${COLOR_RESET} ${COLOR_HEX} → ${COLOR_NEW} in $f"
+                  fi
+              fi
+              [[ $FIRST -eq 1 ]] && exit 0
+          fi
+        done
+
+    echo
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_GREEN}Summary:${COLOR_RESET}"
+    echo -e "   ${COLOR_CYAN}Files scanned:${COLOR_RESET}  ${COLOR_BOLD_WHITE}$(cat "$SCANNED_FILE")${COLOR_RESET}"
+    echo -e "   ${COLOR_CYAN}Files matched:${COLOR_RESET}  ${COLOR_BOLD_YELLOW}$(cat "$MATCHES_FILE")${COLOR_RESET}"
+    [[ -n "$COLOR_NEW" ]] && \
+        echo -e "   ${COLOR_CYAN}Files modified:${COLOR_RESET} ${COLOR_BOLD_GREEN}$(cat "$MODIFIED_FILE")${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    exit 0
+fi
+
+# ===========================================================================
+# UNIQUE HEX COLORS MODE  --unique
+# Find all unique hex color values in matched files
+# ===========================================================================
+if [[ $UNIQUE_MODE -eq 1 ]]; then
+    PATTERN="${ARGS[0]:-.}"
+    ROOT="${ARGS[1]:-.}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Unique hex colors in:${COLOR_RESET} ${COLOR_BLUE}$ROOT${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo
+
+    declare -A color_counts
+    find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do
+          is_binary "$f" && continue
+          # Extract all hex colors from file
+          grep -oiE '#[0-9a-fA-F]{6}\b' "$f" 2>/dev/null
+        done | sort | uniq -c | sort -rn \
+      | while read -r count hex; do
+          hex_lower="${hex,,}"
+          r=$((16#${hex_lower:1:2}))
+          g=$((16#${hex_lower:3:2}))
+          b=$((16#${hex_lower:5:2}))
+          swatch="\033[48;2;${r};${g};${b}m   \033[0m"
+          printf "%b  ${COLOR_BOLD_YELLOW}%-12s${COLOR_RESET} ${COLOR_DIM}%4s occurrences${COLOR_RESET}\n" \
+              "$swatch" "$hex_lower" "$count"
+        done
+
+    echo
+    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    exit 0
+fi
+
+# ===========================================================================
+# STANDARD SEARCH / REPLACE MODES
+# ===========================================================================
+
+# --- Ensure search term ---
+if [[ ${#ARGS[@]} -lt 1 ]]; then
+    echo "Usage: ds [options] <search_term> [replace_term] [path]"
+    echo "Use --help for detailed options"
+    exit 1
+fi
+
+# --- Set PATTERN, REPLACE, ROOT ---
+PATTERN="${ARGS[0]}"
+if [[ ${#ARGS[@]} -ge 2 && -z "$REPLACE" && "${ARGS[1]}" != ./* && ! -d "${ARGS[1]}" ]]; then
+    REPLACE="${ARGS[1]}"
+    ROOT="${ARGS[2]:-.}"
+else
+    ROOT="${ARGS[1]:-.}"
+fi
+
 # --- Line Viewing Mode ---
 if $show_line && [[ -n "$line_number" ]]; then
     echo "Showing line $line_number from files containing \"$PATTERN\""
     [[ $line_context -gt 0 ]] && echo " Context: ±${line_context} lines"
     echo ""
-
     tmp_files=$(mktemp)
     grep -rn \
         $([[ $IGNORE_CASE -eq 1 ]] && echo "-i") \
         $([[ $REGEX -eq 0 ]] && echo "-F") \
         --exclude-dir={.git,__pycache__,.vscode,.idea,node_modules} \
-        "$PATTERN" "$ROOT" 2>/dev/null \
-        | grep -v "/old/" \
+        "$PATTERN" "$ROOT" 2>/dev/null | grep -v "/old/" \
         | cut -d: -f1 | sort -u > "$tmp_files"
-
     while IFS= read -r file; do
         [[ -z "$file" || ! -f "$file" ]] && continue
         echo "═══ $file ═══"
@@ -303,19 +524,10 @@ if $show_line && [[ -n "$line_number" ]]; then
     exit 0
 fi
 
-# --- Build grep options string ---
-GREP_OPTS="-H -n --color=always"
-[[ $IGNORE_CASE -eq 1 ]] && GREP_OPTS="$GREP_OPTS -i"
-[[ $REGEX -eq 0 ]]       && GREP_OPTS="$GREP_OPTS -F"
-[[ $CONTEXT -gt 0 ]]     && GREP_OPTS="$GREP_OPTS -C $CONTEXT"
-[[ $COUNT -eq 1 ]]       && GREP_OPTS="$GREP_OPTS -c"
-
 # --- REPLACE MODE ---
 if [[ -n $REPLACE ]]; then
-    echo "Replace mode: \"$PATTERN\" → \"$REPLACE\" in $ROOT"
-    if [[ $APPLY -eq 0 ]]; then
-        echo "DRY RUN - Use --apply to actually make changes"
-    fi
+    echo "Replace mode: \"$PATTERN\" → \"$REPLACE\" in ${ROOT}"
+    [[ $APPLY -eq 0 ]] && echo "DRY RUN — add --apply to make changes"
     echo
 
     # Filename renaming
@@ -326,13 +538,9 @@ if [[ -n $REPLACE ]]; then
               [[ $DIRS_INCLUDE -eq 0 && -d "$f" ]] && continue
               filename=$(basename "$f")
               if matches_pattern "$filename" "$PATTERN"; then
-                  if [[ $REGEX -eq 1 ]]; then
-                      [[ $IGNORE_CASE -eq 1 ]] \
-                          && newname=$(echo "$filename" | sed -E "s/${PATTERN}/${REPLACE}/gi") \
-                          || newname=$(echo "$filename" | sed -E "s/${PATTERN}/${REPLACE}/g")
-                  else
-                      newname=$(echo "$filename" | sed "s/${PATTERN}/${REPLACE}/g")
-                  fi
+                  [[ $REGEX -eq 1 ]] \
+                      && newname=$(echo "$filename" | sed -E "s/${PATTERN}/${REPLACE}/g") \
+                      || newname=$(echo "$filename" | sed "s/${PATTERN}/${REPLACE}/g")
                   newpath="$(dirname "$f")/$newname"
                   if [[ $APPLY -eq 1 ]]; then
                       mv "$f" "$newpath"
@@ -355,13 +563,10 @@ if [[ -n $REPLACE ]]; then
           | while IFS= read -r -d '' f; do
               is_binary "$f" && continue
               increment_counter "$SCANNED_FILE"
-
-              if [[ $REGEX -eq 1 ]]; then
-                  [[ $IGNORE_CASE -eq 1 ]] && grep_check="grep -E -i" || grep_check="grep -E"
-              else
-                  [[ $IGNORE_CASE -eq 1 ]] && grep_check="grep -F -i" || grep_check="grep -F"
-              fi
-
+              [[ $REGEX -eq 1 && $IGNORE_CASE -eq 1 ]] && grep_check="grep -E -i" \
+                  || { [[ $REGEX -eq 1 ]] && grep_check="grep -E" \
+                  || { [[ $IGNORE_CASE -eq 1 ]] && grep_check="grep -F -i" \
+                  || grep_check="grep -F"; }; }
               if $grep_check -q "$PATTERN" "$f" 2>/dev/null; then
                   increment_counter "$MATCHES_FILE"
                   if [[ $APPLY -eq 1 ]]; then
@@ -382,19 +587,14 @@ if [[ -n $REPLACE ]]; then
     echo "  Files scanned:  $(cat "$SCANNED_FILE")"
     echo "  Matches found:  $(cat "$MATCHES_FILE")"
     echo "  Files modified: $(cat "$MODIFIED_FILE")"
-    if [[ $APPLY -eq 0 ]]; then
-        echo
-        echo "To apply changes: add --apply"
-        echo "To create backups: add --backup"
-        echo "To preview diffs: add --diff"
-    fi
+    [[ $APPLY -eq 0 ]] && echo -e "\nTo apply: add --apply  |  Backups: add --backup  |  Preview: add --diff"
     exit 0
 fi
 
 # --- SEARCH MODE ---
 echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
 echo -e "${COLOR_BOLD_CYAN}Searching for:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$PATTERN\"${COLOR_RESET}"
-echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}$ROOT${COLOR_RESET}"
+echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}${ROOT}${COLOR_RESET}"
 echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
 echo
 
@@ -404,18 +604,17 @@ print_content_matches() {
       | while IFS= read -r -d '' f; do
           is_binary "$f" && continue
           increment_counter "$SCANNED_FILE"
-
           clean_grep_opts="-H -n"
           [[ $IGNORE_CASE -eq 1 ]] && clean_grep_opts="$clean_grep_opts -i"
           [[ $REGEX -eq 0 ]]       && clean_grep_opts="$clean_grep_opts -F"
           [[ $CONTEXT -gt 0 ]]     && clean_grep_opts="$clean_grep_opts -C $CONTEXT"
-
           if grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null | head -1 | grep -q .; then
               echo
               echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
               grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null \
                 | while IFS=: read -r _fp line content; do
-                    printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s\n" "L$line" "$content"
+                    printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s\n" \
+                        "L$line" "$content"
                   done
               echo -e "${COLOR_CYAN}└─${COLOR_RESET}"
               increment_counter "$MATCHES_FILE"
@@ -429,8 +628,7 @@ print_name_matches() {
     find "$root" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
       | while IFS= read -r -d '' f; do
           [[ $DIRS_INCLUDE -eq 0 && -d "$f" ]] && continue
-          filename=$(basename "$f")
-          if matches_pattern "$filename" "$PATTERN"; then
+          if matches_pattern "$(basename "$f")" "$PATTERN"; then
               echo -e "  ${COLOR_YELLOW}*${COLOR_RESET} ${COLOR_CYAN}$f${COLOR_RESET}"
               increment_counter "$MATCHES_FILE"
               [[ $FIRST -eq 1 ]] && exit 0
@@ -438,20 +636,15 @@ print_name_matches() {
         done
 }
 
-# Search both (default)
 if [[ $NAME_ONLY -eq 0 && $CONTENT_ONLY -eq 0 ]]; then
     echo -e "${COLOR_BOLD_GREEN}=== FILENAME MATCHES ===${COLOR_RESET}"
     print_name_matches "$ROOT"
     echo
     echo -e "${COLOR_BOLD_GREEN}=== CONTENT MATCHES ===${COLOR_RESET}"
     print_content_matches "$ROOT"
-
-# Filenames only
 elif [[ $NAME_ONLY -eq 1 ]]; then
     echo -e "${COLOR_BOLD_GREEN}=== FILENAME SEARCH ===${COLOR_RESET}"
     print_name_matches "$ROOT"
-
-# Contents only
 else
     echo -e "${COLOR_BOLD_GREEN}=== CONTENT SEARCH ===${COLOR_RESET}"
     print_content_matches "$ROOT"
