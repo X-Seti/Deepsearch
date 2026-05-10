@@ -58,6 +58,8 @@ REPLACE OPTIONS:
   --apply                 Apply changes (default: dry-run)
   --backup                Create .bak backups before replacing
   --diff                  Show unified diff preview
+ -cc, --comment <string>  Comment out matching lines with ($COMMENT_PREFIX)
+ -ct, --comment-type <prefix>  Comment prefix (# // ;)
 
 COLOR / THEME OPTIONS:
   -k, --colors <hex>             Find all uses of a hex color (e.g. '#2a2a2a')
@@ -77,7 +79,6 @@ OUTPUT:
   --context N             Show N lines of context around matches
   --count                 Print match counts per file only
   --first                 Stop after first match
-  --comment <string>      Comment out matching lines with ($COMMENT_PREFIX)
   -o, --output <file>     Save results to file
   -e, --editor            Open matches in editor ($DEFAULT_EDITOR)
   -l, --line <N>          Show line N from matched files
@@ -127,43 +128,44 @@ THEME_KEY=""
 KDE_MODE=0
 UNIQUE_MODE=0
 COMMENT_MODE=0
-
+COMMENT_TEXT=""
 
 ARGS=()
 
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i|--ignore-case)  IGNORE_CASE=1 ;;
-        -E|--regex)        REGEX=1 ;;
-        -t|--type)         TYPES=$2; shift ;;
-        -r|--replace)      REPLACE=$2; shift ;;
-        --comment)         COMMENT_MODE=1; PATTERN="$2"; shift ;;
-        -f|--find)         ARGS+=("$2"); shift ;;
-        -n|--name-only)    NAME_ONLY=1 ;;
-        -c|--content-only) CONTENT_ONLY=1 ;;
-        -v|--version)      SHOW_VERSION=1 ;;
-        --dirs)            DIRS_INCLUDE=1 ;;
-        --include-old)     INCLUDE_OLD=1 ;;
-        --exclude)         EXCLUDES+=("$2"); shift ;;
-        --apply)           APPLY=1 ;;
-        --backup)          BACKUP=1 ;;
-        --diff)            DIFF=1 ;;
-        --context)         CONTEXT=$2; shift ;;
-        --count)           COUNT=1 ;;
-        --first)           FIRST=1 ;;
-        --binary)          ALLOW_BINARY=1 ;;
-        -l|--line)         show_line=true; line_number="$2"; shift ;;
-        -C)                line_context="$2"; shift ;;
-        -o|--output)       OUTPUT_FILE=$2; shift ;;
-        -e|--editor)       EDITOR_OPEN=1 ;;
-        -k|--colors)       COLOR_MODE=1; COLOR_HEX="$2"; shift
-                           [[ $# -gt 0 && "${2:-}" == "#"* ]] && { COLOR_NEW="$2"; shift; } ;;
-        --theme)           THEME_KEY="$2"; shift ;;
-        --kde)             KDE_MODE=1 ;;
-        --unique)          UNIQUE_MODE=1 ;;
-        -h|--help)         usage ;;
-        *)                 ARGS+=("$1") ;;
+        -i|--ignore-case)    IGNORE_CASE=1 ;;
+        -E|--regex)          REGEX=1 ;;
+        -t|--type)           TYPES=$2; shift ;;
+        -r|--replace)        REPLACE=$2; shift ;;
+        -f|--find)           ARGS+=("$2"); shift ;;
+        -n|--name-only)      NAME_ONLY=1 ;;
+        -v|--version)        SHOW_VERSION=1 ;;
+        --dirs)              DIRS_INCLUDE=1 ;;
+        --include-old)       INCLUDE_OLD=1 ;;
+        --exclude)           EXCLUDES+=("$2"); shift ;;
+        --apply)             APPLY=1 ;;
+        --backup)            BACKUP=1 ;;
+        --diff)              DIFF=1 ;;
+       -cc| --comment)       COMMENT_MODE=1; PATTERN="$2"; shift ;;
+       -ct| --comment-type)  COMMENT_PREFIX="$2"; shift ;;
+        --count)             COUNT=1 ;;
+        --first)             FIRST=1 ;;
+        --binary)            ALLOW_BINARY=1 ;;
+        -l|--line)           show_line=true; line_number="$2"; shift ;;
+       -lc|--line-context)   line_context="$2"; shift ;;
+        -c|--context)        CONTEXT=$2; shift ;;
+        -C|--content-only)   CONTENT_ONLY=1 ;;
+        -o|--output)         OUTPUT_FILE=$2; shift ;;
+        -e|--editor)         EDITOR_OPEN=1 ;;
+        -k|--colors)         COLOR_MODE=1; COLOR_HEX="$2"; shift
+                             [[ $# -gt 0 && "${2:-}" == "#"* ]] && { COLOR_NEW="$2"; shift; } ;;
+        --theme)             THEME_KEY="$2"; shift ;;
+        --kde)               KDE_MODE=1 ;;
+        --unique)            UNIQUE_MODE=1 ;;
+        -h|--help)           usage ;;
+        *)                   ARGS+=("$1") ;;
     esac
     shift
 done
@@ -606,7 +608,7 @@ if [[ $COMMENT_MODE -eq 1 ]]; then
     ROOT="${ARGS[0]:-.}"
 
     echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_CYAN}Commenting lines containing:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$PATTERN\"${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Commenting lines containing:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$COMMENT_TEXT\"${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}${ROOT}${COLOR_RESET}"
     [[ $APPLY -eq 0 ]] && \
         echo -e "${COLOR_BOLD_YELLOW}DRY RUN${COLOR_RESET} — add --apply to modify files"
@@ -619,11 +621,11 @@ if [[ $COMMENT_MODE -eq 1 ]]; then
           is_binary "$f" && continue
           increment_counter "$SCANNED_FILE"
 
-          if grep -F -q "$PATTERN" "$f" 2>/dev/null; then
+          if grep -F -q "$COMMENT_TEXT" "$f" 2>/dev/null; then
               echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
 
-              grep -n -F "$PATTERN" "$f" 2>/dev/null \
-                | grep -v '^[0-9]*:#' \
+              grep -n -F "$COMMENT_TEXT" "$f" 2>/dev/null \
+                | grep -v "^[0-9]*:${COMMENT_PREFIX}" \
                 | while IFS=: read -r lineno content; do
 
                     printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s\n" \
@@ -635,9 +637,9 @@ if [[ $COMMENT_MODE -eq 1 ]]; then
               if [[ $APPLY -eq 1 ]]; then
                   [[ $BACKUP -eq 1 ]] && cp "$f" "$f.bak"
 
-                  sed -i "/${PATTERN}/ {
-                      /^[[:space:]]*#/! s/^/#/
-                  }" "$f"
+                  sed -i "/$COMMENT_TEXT/ {
+                      /^[[:space:]]*${COMMENT_PREFIX//\//\\/}/! s|^|${COMMENT_PREFIX}|
+                }" "$f"
 
                   echo -e "  ${COLOR_GREEN}Modified:${COLOR_RESET} $f"
                   increment_counter "$MODIFIED_FILE"
