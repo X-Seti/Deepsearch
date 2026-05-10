@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # X-Seti - deepsearch v1.5 - Unified search, replace, and color analysis tool
 # Searches filenames AND file contents by default, with extensive replace capabilities
+#
+# Sun, May 26 - Added name search, comment line out function.
 
 set -euo pipefail
 VERS="1.5"
@@ -33,6 +35,7 @@ fi
 
 # --- Configurable ---
 DEFAULT_EDITOR="kate"
+COMMENT_PREFIX="#"
 
 usage() {
     cat <<EOF
@@ -74,11 +77,13 @@ OUTPUT:
   --context N             Show N lines of context around matches
   --count                 Print match counts per file only
   --first                 Stop after first match
+  --comment <string>      Comment out matching lines with ($COMMENT_PREFIX)
   -o, --output <file>     Save results to file
   -e, --editor            Open matches in editor ($DEFAULT_EDITOR)
   -l, --line <N>          Show line N from matched files
   -C <N>                  Lines of context around --line
   -h, --help              Show this help
+
 
 EXAMPLES:
   $0 myfunction                             # search names AND contents
@@ -121,6 +126,8 @@ COLOR_NEW=""
 THEME_KEY=""
 KDE_MODE=0
 UNIQUE_MODE=0
+COMMENT_MODE=0
+
 
 ARGS=()
 
@@ -131,6 +138,7 @@ while [[ $# -gt 0 ]]; do
         -E|--regex)        REGEX=1 ;;
         -t|--type)         TYPES=$2; shift ;;
         -r|--replace)      REPLACE=$2; shift ;;
+        --comment)         COMMENT_MODE=1; PATTERN="$2"; shift ;;
         -f|--find)         ARGS+=("$2"); shift ;;
         -n|--name-only)    NAME_ONLY=1 ;;
         -c|--content-only) CONTENT_ONLY=1 ;;
@@ -230,15 +238,15 @@ for excl in "${EXCLUDES[@]}"; do
     FIND_EXPR+=(-not -path "*$excl")
 done
 
-# ===========================================================================
+
 # THEME KEY MODE  --theme <key>
 # Show the value of a theme key across all JSON theme files
-# ===========================================================================
+
 if [[ -n "$THEME_KEY" ]]; then
     ROOT="${ARGS[0]:-.}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}Theme key:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$THEME_KEY\"${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo
 
     found=0
@@ -272,22 +280,22 @@ except: pass
 
     echo
     [[ $found -eq 0 ]] && echo "Key '$THEME_KEY' not found in any theme file."
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "   ${COLOR_CYAN}Themes with key:${COLOR_RESET} ${COLOR_BOLD_WHITE}$(cat "$MATCHES_FILE")${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     exit 0
 fi
 
-# ===========================================================================
+
 # KDE COLOR MODE  --kde
 # Compare KDE color roles with theme JSON keys
-# ===========================================================================
+
 if [[ $KDE_MODE -eq 1 ]]; then
     ROOT="${ARGS[0]:-.}"
     kdeglobals="${HOME}/.config/kdeglobals"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}KDE Color Roles vs Theme Keys${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo
 
     # KDE role -> our theme key mapping
@@ -316,7 +324,7 @@ if [[ $KDE_MODE -eq 1 ]]; then
 
     printf "${COLOR_BOLD_WHITE}%-35s %-20s %-20s %s${COLOR_RESET}\n" \
         "KDE Role" "KDE Value" "Theme Key" "Match?"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+    echo " ─ "
 
     for kde_key in "${!KDE_MAP[@]}"; do
         theme_key="${KDE_MAP[$kde_key]}"
@@ -354,27 +362,27 @@ except: print('?')
 
     echo
     echo -e "${COLOR_DIM}KDE globals: $kdeglobals${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     exit 0
 fi
 
-# ===========================================================================
+
 # COLOR SEARCH MODE  -k / --colors <hex> [new_hex]
 # Find all uses of a hex color, optionally replace
 # Also shows which theme key the color is used as fallback for
-# ===========================================================================
+
 if [[ $COLOR_MODE -eq 1 ]]; then
     ROOT="${ARGS[0]:-.}"
     hex_lower="${COLOR_HEX,,}"
     hex_upper="${COLOR_HEX^^}"
 
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}Color search:${COLOR_RESET} ${COLOR_BOLD_YELLOW}${COLOR_HEX}${COLOR_RESET}"
     [[ -n "$COLOR_NEW" ]] && echo -e "${COLOR_BOLD_CYAN}Replace with:${COLOR_RESET} ${COLOR_BOLD_YELLOW}${COLOR_NEW}${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}$ROOT${COLOR_RESET}"
     [[ -n "$COLOR_NEW" && $APPLY -eq 0 ]] && \
         echo -e "${COLOR_BOLD_YELLOW}DRY RUN${COLOR_RESET} — add --apply to make changes"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo
 
     # Show color swatch
@@ -429,26 +437,25 @@ if [[ $COLOR_MODE -eq 1 ]]; then
         done
 
     echo
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "${COLOR_BOLD_GREEN}Summary:${COLOR_RESET}"
     echo -e "   ${COLOR_CYAN}Files scanned:${COLOR_RESET}  ${COLOR_BOLD_WHITE}$(cat "$SCANNED_FILE")${COLOR_RESET}"
     echo -e "   ${COLOR_CYAN}Files matched:${COLOR_RESET}  ${COLOR_BOLD_YELLOW}$(cat "$MATCHES_FILE")${COLOR_RESET}"
     [[ -n "$COLOR_NEW" ]] && \
         echo -e "   ${COLOR_CYAN}Files modified:${COLOR_RESET} ${COLOR_BOLD_GREEN}$(cat "$MODIFIED_FILE")${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     exit 0
 fi
 
-# ===========================================================================
 # UNIQUE HEX COLORS MODE  --unique
 # Find all unique hex color values in matched files
-# ===========================================================================
+
 if [[ $UNIQUE_MODE -eq 1 ]]; then
     PATTERN="${ARGS[0]:-.}"
     ROOT="${ARGS[1]:-.}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo -e "${COLOR_BOLD_CYAN}Unique hex colors in:${COLOR_RESET} ${COLOR_BLUE}$ROOT${COLOR_RESET}"
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     echo
 
     declare -A color_counts
@@ -469,13 +476,12 @@ if [[ $UNIQUE_MODE -eq 1 ]]; then
         done
 
     echo
-    echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
     exit 0
 fi
 
-# ===========================================================================
+
 # STANDARD SEARCH / REPLACE MODES
-# ===========================================================================
 
 # --- Ensure search term ---
 if [[ ${#ARGS[@]} -lt 1 ]]; then
@@ -591,11 +597,73 @@ if [[ -n $REPLACE ]]; then
     exit 0
 fi
 
+
+
+# COMMENT MODE
+# Comment out matching lines with #
+
+if [[ $COMMENT_MODE -eq 1 ]]; then
+    ROOT="${ARGS[0]:-.}"
+
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Commenting lines containing:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$PATTERN\"${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}${ROOT}${COLOR_RESET}"
+    [[ $APPLY -eq 0 ]] && \
+        echo -e "${COLOR_BOLD_YELLOW}DRY RUN${COLOR_RESET} — add --apply to modify files"
+    echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
+    echo
+
+    find "$ROOT" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do
+
+          is_binary "$f" && continue
+          increment_counter "$SCANNED_FILE"
+
+          if grep -F -q "$PATTERN" "$f" 2>/dev/null; then
+              echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
+
+              grep -n -F "$PATTERN" "$f" 2>/dev/null \
+                | grep -v '^[0-9]*:#' \
+                | while IFS=: read -r lineno content; do
+
+                    printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s\n" \
+                        "L${lineno}" "$content"
+                done
+
+              echo -e "${COLOR_CYAN}└─${COLOR_RESET}"
+
+              if [[ $APPLY -eq 1 ]]; then
+                  [[ $BACKUP -eq 1 ]] && cp "$f" "$f.bak"
+
+                  sed -i "/${PATTERN}/ {
+                      /^[[:space:]]*#/! s/^/#/
+                  }" "$f"
+
+                  echo -e "  ${COLOR_GREEN}Modified:${COLOR_RESET} $f"
+                  increment_counter "$MODIFIED_FILE"
+              else
+                  echo -e "  ${COLOR_YELLOW}Would modify:${COLOR_RESET} $f"
+              fi
+
+              increment_counter "$MATCHES_FILE"
+              [[ $FIRST -eq 1 ]] && exit 0
+          fi
+      done
+
+    echo
+    echo "Summary:"
+    echo "  Files scanned:  $(cat "$SCANNED_FILE")"
+    echo "  Matches found:  $(cat "$MATCHES_FILE")"
+    echo "  Files modified: $(cat "$MODIFIED_FILE")"
+
+    exit 0
+fi
+
 # --- SEARCH MODE ---
-echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
 echo -e "${COLOR_BOLD_CYAN}Searching for:${COLOR_RESET} ${COLOR_BOLD_YELLOW}\"$PATTERN\"${COLOR_RESET}"
 echo -e "${COLOR_BOLD_CYAN}Location:${COLOR_RESET} ${COLOR_BLUE}${ROOT}${COLOR_RESET}"
-echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
 echo
 
 print_content_matches() {
@@ -669,8 +737,8 @@ fi
 
 # --- Summary ---
 echo
-echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
 echo -e "${COLOR_BOLD_GREEN}Summary:${COLOR_RESET}"
 echo -e "   ${COLOR_CYAN}Files scanned:${COLOR_RESET} ${COLOR_BOLD_WHITE}$(cat "$SCANNED_FILE")${COLOR_RESET}"
 echo -e "   ${COLOR_CYAN}Matches found:${COLOR_RESET} ${COLOR_BOLD_YELLOW}$(cat "$MATCHES_FILE")${COLOR_RESET}"
-echo -e "${COLOR_BOLD_BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+echo -e "${COLOR_BOLD_BLUE} ━ ${COLOR_RESET}"
