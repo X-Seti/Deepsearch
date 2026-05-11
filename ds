@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# X-Seti - deepsearch v1.5 - Unified search, replace, and color analysis tool
+# X-Seti - deepsearch v1.6 - Unified search, replace, and color analysis tool
 # Searches filenames AND file contents by default, with extensive replace capabilities
 #
-# Sun, May 26 - Added name search, comment line out function.
+# Sun 10, May 26 - Added name search, comment line out function.
+# Mon 11, May 26 - clean_grep_opts to grep_opts
 
 set -euo pipefail
-VERS="1.5"
+VERS="1.6"
 APP_NAME="Deepsearch"
-DATE="April 2026"
+DATE="May 2026"
 
 # --- Color Definitions ---
 if [[ -t 1 ]]; then
@@ -82,7 +83,7 @@ OUTPUT:
   -o, --output <file>     Save results to file
   -e, --editor            Open matches in editor ($DEFAULT_EDITOR)
   -l, --line <N>          Show line N from matched files
-  -C <N>                  Lines of context around --line
+  -C, --context <N>       Lines of context around --line
   -h, --help              Show this help
 
 
@@ -148,15 +149,15 @@ while [[ $# -gt 0 ]]; do
         --apply)             APPLY=1 ;;
         --backup)            BACKUP=1 ;;
         --diff)              DIFF=1 ;;
-       -cc| --comment)       COMMENT_MODE=1; PATTERN="$2"; shift ;;
-       -ct| --comment-type)  COMMENT_PREFIX="$2"; shift ;;
+       -cc|--comment)       COMMENT_MODE=1; COMMENT_TEXT="$2"; shift ;;
+       -ct|--comment-type)  COMMENT_PREFIX="$2"; shift ;;
         --count)             COUNT=1 ;;
         --first)             FIRST=1 ;;
         --binary)            ALLOW_BINARY=1 ;;
         -l|--line)           show_line=true; line_number="$2"; shift ;;
        -lc|--line-context)   line_context="$2"; shift ;;
-        -c|--context)        CONTEXT=$2; shift ;;
-        -C|--content-only)   CONTENT_ONLY=1 ;;
+        -C|--context)        CONTEXT=$2; shift ;;
+        -c|--content-only)   CONTENT_ONLY=1 ;;
         -o|--output)         OUTPUT_FILE=$2; shift ;;
         -e|--editor)         EDITOR_OPEN=1 ;;
         -k|--colors)         COLOR_MODE=1; COLOR_HEX="$2"; shift
@@ -183,9 +184,14 @@ increment_counter() {
     echo $((n + 1)) > "$file"
 }
 
+#is_binary() { local file=$1 [[ $ALLOW_BINARY -eq 0 ]] && file -b --mime "$file" 2>/dev/null | grep -q binary } #Keep for logging.
+
 is_binary() {
     local file=$1
-    [[ $ALLOW_BINARY -eq 0 ]] && file -b --mime "$file" 2>/dev/null | grep -q binary
+
+    [[ $ALLOW_BINARY -eq 1 ]] && return 1
+
+    file -b --mime "$file" 2>/dev/null | grep -q binary
 }
 
 matches_pattern() {
@@ -208,7 +214,16 @@ apply_replacement() {
         echo "  Diff for $file:"
         sed "s|${pattern}|${replacement}|g" "$file" | diff -u "$file" - || true
     fi
-    sed -i "s|${pattern}|${replacement}|g" "$file"
+    #sed -i "s|${pattern}|${replacement}|g" "$file" #Issue: &, \ , delimiter chars, regex chars
+
+    escape_regex() {
+    printf '%s\n' "$1" | sed 's/[][(){}.^$*+?|\/]/\\&/g'
+    }
+
+    escape_sed_replacement() {
+    printf '%s' "$1" | sed 's/[&/\]/\\&/g'
+    }
+    replacement_escaped=$(escape_sed_replacement "$replacement")
 }
 
 # --- Setup temp counters (AFTER functions defined) ---
@@ -235,9 +250,13 @@ if [[ -n $TYPES ]]; then
     for ext in "${exts[@]}"; do type_expr+=(-name "$ext" -o); done
     unset 'type_expr[${#type_expr[@]}-1]'
     FIND_EXPR=(\( "${type_expr[@]}" \) -type f)
+else
+FIND_EXPR=(-type f)
 fi
+
 for excl in "${EXCLUDES[@]}"; do
     FIND_EXPR+=(-not -path "*$excl")
+    #find "$ROOT" -type f \( ...patterns... \)
 done
 
 
@@ -402,7 +421,8 @@ if [[ $COLOR_MODE -eq 1 ]]; then
           increment_counter "$SCANNED_FILE"
 
           # Search case-insensitively for the hex value
-          if grep -qi "$hex_lower\|$hex_upper" "$f" 2>/dev/null; then
+          #if grep -qi "$hex_lower\|$hex_upper" "$f" 2>/dev/null; then
+          if grep -Eqi "$hex_lower\|$hex_upper" "$f" 2>/dev/null; then
               echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
 
               # Show matching lines with context about what key it's a fallback for
@@ -435,7 +455,8 @@ if [[ $COLOR_MODE -eq 1 ]]; then
                   fi
               fi
               [[ $FIRST -eq 1 ]] && exit 0
-          fi
+              #while IFS= read -r -d '' f; do; ...;done < <(find ...)
+            fi
         done
 
     echo
@@ -599,8 +620,6 @@ if [[ -n $REPLACE ]]; then
     exit 0
 fi
 
-
-
 # COMMENT MODE
 # Comment out matching lines with #
 
@@ -674,22 +693,33 @@ print_content_matches() {
       | while IFS= read -r -d '' f; do
           is_binary "$f" && continue
           increment_counter "$SCANNED_FILE"
-          clean_grep_opts="-H -n"
-          [[ $IGNORE_CASE -eq 1 ]] && clean_grep_opts="$clean_grep_opts -i"
-          [[ $REGEX -eq 0 ]]       && clean_grep_opts="$clean_grep_opts -F"
-          [[ $CONTEXT -gt 0 ]]     && clean_grep_opts="$clean_grep_opts -C $CONTEXT"
-          if grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null | head -1 | grep -q .; then
+
+          #clean_grep_opts="-H -n"
+          grep_opts=(-H -n)
+
+          #[[ $IGNORE_CASE -eq 1 ]] && clean_grep_opts="$clean_grep_opts -i"
+          [[ $IGNORE_CASE -eq 1 ]] && grep_opts+=(-i)
+
+          #[[ $REGEX -eq 0 ]] && clean_grep_opts="$clean_grep_opts -F"
+          [[ $REGEX -eq 0 ]] && grep_opts+=(-F)
+
+          #[[ $CONTEXT -gt 0 ]] && clean_grep_opts="$clean_grep_opts -C $CONTEXT"
+          [[ $CONTEXT -gt 0 ]] && grep_opts="$grep_opts -C $CONTEXT"
+
+          #if grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null | head -1 | grep -q .; then
+          if grep $grep_opts "$PATTERN" "$f" 2>/dev/null | head -1 | grep -q .; then
               echo
               echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
-              grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null \
-                | while IFS=: read -r _fp line content; do
+
+              #grep $clean_grep_opts "$PATTERN" "$f" 2>/dev/null \
+              grep "${grep_opts[@]}" "$PATTERN" "$f" 2>/dev/null \ | while IFS=: read -r _fp line content; do
                     printf "${COLOR_CYAN}│${COLOR_RESET} ${COLOR_MAGENTA}%6s${COLOR_RESET} ${COLOR_DIM}│${COLOR_RESET} %s\n" \
                         "L$line" "$content"
                   done
               echo -e "${COLOR_CYAN}└─${COLOR_RESET}"
               increment_counter "$MATCHES_FILE"
               [[ $FIRST -eq 1 ]] && exit 0
-          fi
+          fi #2
         done
 }
 
@@ -707,16 +737,16 @@ print_name_matches() {
 }
 
 if [[ $NAME_ONLY -eq 0 && $CONTENT_ONLY -eq 0 ]]; then
-    echo -e "${COLOR_BOLD_GREEN}=== FILENAME MATCHES ===${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_GREEN}FILENAME MATCHES:${COLOR_RESET}"
     print_name_matches "$ROOT"
     echo
-    echo -e "${COLOR_BOLD_GREEN}=== CONTENT MATCHES ===${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_GREEN}CONTENT MATCHES:${COLOR_RESET}"
     print_content_matches "$ROOT"
 elif [[ $NAME_ONLY -eq 1 ]]; then
-    echo -e "${COLOR_BOLD_GREEN}=== FILENAME SEARCH ===${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_GREEN}FILENAME SEARCH:${COLOR_RESET}"
     print_name_matches "$ROOT"
 else
-    echo -e "${COLOR_BOLD_GREEN}=== CONTENT SEARCH ===${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_GREEN}CONTENT SEARCH:${COLOR_RESET}"
     print_content_matches "$ROOT"
 fi
 
