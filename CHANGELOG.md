@@ -1,5 +1,10 @@
 # Deepsearch — Changelog
 
+## v1.7 — April 2026
+
+**Bug fixes:**
+- Format fixes on terminal output. 
+
 ## v1.4 — April 2026
 
 **Bug fixes:**

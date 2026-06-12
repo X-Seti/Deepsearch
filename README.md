@@ -1,5 +1,7 @@
 # X-Seti - Deepsearch — Aug 2018–2026
 
+#Update; Format fixes, Better terminel output.
+
 `ds` / `deepsearch` is a fast command-line search and replace tool.
 Searches **filenames and file contents** by default, with dry-run replace, regex, backups, diffs, and more.
 
