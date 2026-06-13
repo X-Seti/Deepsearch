@@ -1,9 +1,15 @@
 # Deepsearch — Changelog
 
-## v1.7 — April 2026
+## v1.7 — Jun 2026
+
+**New features:**
+- `--list` mode: print matching filenames only with no content output, suitable for piping to xargs or other tools
+- `--shebang <type>` filter: match files by interpreter line (bash, python, sh, perl, node) regardless of file extension
+- `--count` now shows per-file match counts inline with filename during search, not just a total
+- Comment mode summary now uses the same colour formatting as all other modes
 
 **Bug fixes:**
-- Format fixes on terminal output. 
+- `VERS` corrected from 1.6 to 1.7 to match header comment
 
 ## v1.4 — April 2026
 

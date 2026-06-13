@@ -7,7 +7,7 @@
 # Mon 11, May 26 - clean_grep_opts to grep_opts
 
 set -euo pipefail
-VERS="1.6"
+VERS="1.7"
 APP_NAME="Deepsearch"
 DATE="May 2026"
 
@@ -53,6 +53,8 @@ OPTIONS:
   -n, --name-only         Search filenames only
   -f, --find              Find files by name
   -c, --content-only      Search file contents only
+  --list                  Print matching filenames only (no content), pipeable
+  --shebang <type>        Match files by shebang (bash, python, sh, perl, node)
   -v, --version           Show version
 
 REPLACE OPTIONS:
@@ -131,6 +133,8 @@ KDE_MODE=0
 UNIQUE_MODE=0
 COMMENT_MODE=0
 COMMENT_TEXT=""
+LIST_ONLY=0
+SHEBANG_TYPE=""
 
 ARGS=()
 
@@ -166,6 +170,8 @@ while [[ $# -gt 0 ]]; do
         --theme)             THEME_KEY="$2"; shift ;;
         --kde)               KDE_MODE=1 ;;
         --unique)            UNIQUE_MODE=1 ;;
+        --list)              LIST_ONLY=1 ;;
+        --shebang)           SHEBANG_TYPE="$2"; shift ;;
         -h|--help)           usage ;;
         *)                   ARGS+=("$1") ;;
     esac
@@ -292,6 +298,21 @@ for excl in "${EXCLUDES[@]}"; do
     FIND_EXPR+=(-not -path "*$excl")
     #find "$ROOT" -type f \( ...patterns... \)
 done
+
+# Shebang filter - match files whose first line matches interpreter
+matches_shebang() {
+    local file=$1 stype=$2
+    local first_line
+    first_line=$(head -1 "$file" 2>/dev/null)
+    case "$stype" in
+        bash)   echo "$first_line" | grep -q 'bash' ;;
+        python) echo "$first_line" | grep -qE 'python[23]?' ;;
+        sh)     echo "$first_line" | grep -qE '\bsh\b' ;;
+        perl)   echo "$first_line" | grep -q 'perl' ;;
+        node)   echo "$first_line" | grep -q 'node' ;;
+        *)      echo "$first_line" | grep -qi "$stype" ;;
+    esac
+}
 
 
 # THEME KEY MODE  --theme <key>
@@ -693,10 +714,10 @@ if [[ $COMMENT_MODE -eq 1 ]]; then
       done
 
     echo
-    echo "Summary:"
-    echo "   Files scanned:  $(cat "$SCANNED_FILE")"
-    echo "   Matches found:  $(cat "$MATCHES_FILE")"
-    echo "   Files modified: $(cat "$MODIFIED_FILE")"
+    echo -e "${COLOR_BOLD_BLUE} ━${COLOR_RESET} ${COLOR_BOLD_GREEN}Summary:${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━${COLOR_RESET} ${COLOR_CYAN}   Files scanned:${COLOR_RESET}  ${COLOR_BOLD_WHITE}$(cat "$SCANNED_FILE")${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━${COLOR_RESET} ${COLOR_CYAN}   Matches found:${COLOR_RESET}  ${COLOR_BOLD_YELLOW}$(cat "$MATCHES_FILE")${COLOR_RESET}"
+    echo -e "${COLOR_BOLD_BLUE} ━${COLOR_RESET} ${COLOR_CYAN}   Files modified:${COLOR_RESET} ${COLOR_BOLD_GREEN}$(cat "$MODIFIED_FILE")${COLOR_RESET}"
 
     exit 0
 fi
@@ -714,6 +735,7 @@ print_content_matches() {
     while IFS= read -r -d '' f; do
 
         is_binary "$f" && continue
+        [[ -n "$SHEBANG_TYPE" ]] && ! matches_shebang "$f" "$SHEBANG_TYPE" && continue
         increment_counter "$SCANNED_FILE"
 
         grep_opts=(-H -n)
@@ -723,6 +745,24 @@ print_content_matches() {
         [[ $CONTEXT -gt 0 ]] && grep_opts+=(-C "$CONTEXT")
 
         if grep -q "${grep_opts[@]}" "$PATTERN" "$f" 2>/dev/null; then
+
+            increment_counter "$MATCHES_FILE"
+
+            # --list: print filename only, pipeable
+            if [[ $LIST_ONLY -eq 1 ]]; then
+                echo "$f"
+                [[ $FIRST -eq 1 ]] && exit 0
+                continue
+            fi
+
+            # --count: print filename with match count, no content
+            if [[ $COUNT -eq 1 ]]; then
+                local n
+                n=$(grep -c "${grep_opts[@]}" "$PATTERN" "$f" 2>/dev/null || true)
+                echo -e "  ${COLOR_BOLD_YELLOW}$f${COLOR_RESET} ${COLOR_DIM}($n match$([ "$n" -eq 1 ] || echo "es"))${COLOR_RESET}"
+                [[ $FIRST -eq 1 ]] && exit 0
+                continue
+            fi
 
             echo
             echo -e "${COLOR_BOLD_CYAN}┌─${COLOR_RESET} ${COLOR_BOLD_YELLOW}$f${COLOR_RESET}"
@@ -735,8 +775,6 @@ print_content_matches() {
 
             echo -e "${COLOR_CYAN}└─${COLOR_RESET}"
 
-            increment_counter "$MATCHES_FILE"
-
             [[ $FIRST -eq 1 ]] && exit 0
         fi
     done
@@ -747,6 +785,7 @@ print_name_matches() {
     find "$root" \( "${FIND_EXPR[@]}" \) -print0 2>/dev/null \
       | while IFS= read -r -d '' f; do
           [[ $DIRS_INCLUDE -eq 0 && -d "$f" ]] && continue
+          [[ -n "$SHEBANG_TYPE" ]] && ! matches_shebang "$f" "$SHEBANG_TYPE" && continue
           if matches_pattern "$(basename "$f")" "$PATTERN"; then
               echo -e "  ${COLOR_YELLOW}*${COLOR_RESET} ${COLOR_CYAN}$f${COLOR_RESET}"
               increment_counter "$MATCHES_FILE"
